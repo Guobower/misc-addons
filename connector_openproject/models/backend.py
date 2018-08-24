@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
-# Copyright 2017 Naglis Jonaitis
+# Copyright 2017-2018 Naglis Jonaitis
 # License AGPL-3 or later (https://www.gnu.org/licenses/agpl).
+
+import binascii
+import os
+import urlparse
 
 from odoo import api, fields, models
 
 from ..const import (
     DEFAULT_PAGE_SIZE,
     DEFAULT_TIMEOUT,
+    OP_WEBHOOK_EVENT_WP_CREATED,
+    OP_WEBHOOK_EVENT_WP_UPDATED,
 )
+from ..exceptions import OpenProjectWebhookDataError
 from ..utils import (
     job_func,
     last_update,
@@ -49,6 +56,25 @@ class OpenProjectBackend(models.Model):
         help='URL to the OpenProject instance',
         required=True,
     )
+    webhook_secret = fields.Char(
+        string='Webhook Signature Secret',
+        help='Use this key as the "Signature secret" when configuring the '
+             'webhook on OpenProject. It allows to verify the authenticity '
+             'and integrity of webhook requests.',
+        readonly=True,
+        required=True,
+        copy=False,
+        default=lambda self: binascii.hexlify(os.urandom(32)).decode(),
+    )
+    webhook_url = fields.Char(
+        compute='_compute_webhook_url',
+        string='Webhook Payload URL',
+        help='Use this URL as the "Payload URL" when configuring the webhook '
+             'on OpenProject.',
+        readonly=True,
+        store=False,
+    )
+
     sync_project_status = fields.Boolean(
         string='Synchronize Project Status',
         help='If enabled, archived/unarchived projects on the OpenProject '
@@ -123,6 +149,15 @@ class OpenProjectBackend(models.Model):
             rec.time_entry_count = len(rec.op_time_entry_ids)
 
     @api.multi
+    def _compute_webhook_url(self):
+        base_url = self.env['ir.config_parameter'].sudo().get_param(
+            'web.base.url')
+        for rec in self:
+            rec.webhook_url = urlparse.urljoin(
+                base_url, '/openproject/webhook/{db:s}/{backend_id:d}'.format(
+                    db=self.env.cr.dbname, backend_id=rec.id))
+
+    @api.multi
     def toggle_debug(self):
         '''
         Inverse the value of the field ``debug`` on the records in ``self``.
@@ -185,3 +220,17 @@ class OpenProjectBackend(models.Model):
         # Work package and time entry import jobs are bootstraped by the
         # project import job.
         backends.import_projects()
+
+    @api.multi
+    def _handle_webhook(self, event, data, delay=True):
+        self.ensure_one()
+        if event in (OP_WEBHOOK_EVENT_WP_CREATED, OP_WEBHOOK_EVENT_WP_UPDATED):
+            work_package_data = data.get('work_package')
+            if not work_package_data:
+                raise OpenProjectWebhookDataError(
+                    'Work package data is missing from webhook event data')
+            job_func(
+                self.env['openproject.project.task'],
+                'import_record',
+                delay=delay,
+            )(self, work_package_data)

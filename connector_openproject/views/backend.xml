@@ -109,6 +109,10 @@
                         <field name="timeout"/>
                         <field name="page_size"/>
                     </group>
+                    <group name="webhook" string="Webhook">
+                        <field name="webhook_url" string="Payload URL" widget="url"/>
+                        <field name="webhook_secret" string="Signature Secret"/>
+                    </group>
                 </group>
 
             </sheet>
